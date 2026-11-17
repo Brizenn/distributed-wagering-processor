@@ -1,0 +1,74 @@
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import type { Response, Request } from 'express';
+import {
+  ConflictError,
+  NotFoundError,
+  BusinessRejectionError,
+} from '../../application/errors/application-error';
+import { DomainError } from '../../domain/common/domain-error';
+
+@Catch()
+export class GlobalExceptionFilter implements ExceptionFilter {
+  private readonly logger = new Logger(GlobalExceptionFilter.name);
+
+  public catch(exception: unknown, host: ArgumentsHost): void {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request & { correlationId?: string }>();
+    const correlationId = request.correlationId;
+
+    let status = HttpStatus.INTERNAL_SERVER_ERROR;
+    let error = 'Internal Server Error';
+    let message = 'An unexpected error occurred';
+    let failureCode: string | undefined;
+
+    if (exception instanceof NotFoundError) {
+      status = HttpStatus.NOT_FOUND;
+      error = 'Not Found';
+      message = exception.message;
+    } else if (exception instanceof ConflictError) {
+      status = HttpStatus.CONFLICT;
+      error = 'Conflict';
+      message = exception.message;
+    } else if (exception instanceof BusinessRejectionError) {
+      status = HttpStatus.UNPROCESSABLE_ENTITY;
+      error = 'Business Rule Rejection';
+      message = exception.message;
+      failureCode = exception.failureCode;
+    } else if (exception instanceof DomainError) {
+      status = HttpStatus.UNPROCESSABLE_ENTITY;
+      error = 'Domain Error';
+      message = exception.message;
+    } else if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      const res = exception.getResponse();
+      if (typeof res === 'object' && res !== null) {
+        const body = res as Record<string, unknown>;
+        error = (body.error as string) ?? exception.name;
+        message = (body.message as string) ?? exception.message;
+      } else {
+        message = String(res);
+      }
+    } else if (exception instanceof Error) {
+      this.logger.error(`Unhandled error: ${exception.message}`, exception.stack);
+      message = exception.message;
+    }
+
+    response.status(status).json({
+      statusCode: status,
+      error,
+      message,
+      failureCode,
+      correlationId,
+      timestamp: new Date().toISOString(),
+      path: request.url,
+    });
+  }
+}
