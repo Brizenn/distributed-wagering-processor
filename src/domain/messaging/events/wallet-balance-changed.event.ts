@@ -1,0 +1,43 @@
+import { IntegrationEvent, EventContext } from '../integration-event';
+import { LedgerDirection, WalletLedgerEntry } from '../../wallet/wallet-ledger-entry';
+import { Wallet } from '../../wallet/wallet';
+import { MoneyProps } from '../../common/money';
+
+export interface WalletBalanceChangedData {
+  walletId: string;
+  transactionId: string;
+  direction: LedgerDirection;
+  money: MoneyProps;
+  balanceBefore: MoneyProps;
+  balanceAfter: MoneyProps;
+  walletVersion: number;
+}
+
+export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedData> {
+  readonly eventType = 'WalletBalanceChanged';
+  readonly version = 1;
+
+  public static from(
+    wallet: Wallet,
+    entry: WalletLedgerEntry,
+    ctx: EventContext,
+    eventId: string = crypto.randomUUID(),
+  ): WalletBalanceChanged {
+    return new WalletBalanceChanged({
+      eventId,
+      aggregateId: wallet.id,
+      correlationId: ctx.correlationId,
+      causationId: ctx.causationId,
+      occurredAt: entry.createdAt,
+      data: {
+        walletId: wallet.id,
+        transactionId: entry.transactionId,
+        direction: entry.direction,
+        money: entry.money.toJSON(),
+        balanceBefore: entry.balanceBefore.toJSON(),
+        balanceAfter: entry.balanceAfter.toJSON(),
+        walletVersion: wallet.version,
+      },
+    });
+  }
+}
