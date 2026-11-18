@@ -32,6 +32,7 @@ describe('WagerTransactionService (Unit)', () => {
     wallets.set('w-1', mockWallet);
 
     const mockEm: any = {
+      flush: async () => {},
       transactional: async (cb: any) => cb(mockEm),
       findOne: async (entityClass: any, filter: any) => {
         if (entityClass === WalletEntity) {

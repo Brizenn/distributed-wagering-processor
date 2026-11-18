@@ -83,6 +83,7 @@ export class WalletService {
 
       const walletEntity = WalletMapper.toEntity(wallet);
       em.persist(walletEntity);
+      await em.flush?.();
 
       // If initial balance > 0, generate internal OPENING transaction and ledger entry
       if (initialMoney.isPositive()) {
@@ -106,6 +107,10 @@ export class WalletService {
         });
         openingTx.markProcessed(undefined, now);
 
+        const txEntity = WagerTransactionMapper.toEntity(openingTx);
+        em.persist(txEntity);
+        await em.flush?.();
+
         const ledgerEntry = WalletLedgerEntry.create({
           id: ledgerId,
           walletId,
@@ -117,7 +122,6 @@ export class WalletService {
           createdAt: now,
         });
 
-        const txEntity = WagerTransactionMapper.toEntity(openingTx);
         const ledgerEntity = WalletLedgerMapper.toEntity(ledgerEntry);
 
         const eventCtx = { correlationId: randomUUID() };
@@ -127,7 +131,6 @@ export class WalletService {
         const outbox1 = OutboxMessage.enqueue(balanceChangedEvent);
         const outbox2 = OutboxMessage.enqueue(txProcessedEvent);
 
-        em.persist(txEntity);
         em.persist(ledgerEntity);
         em.persist(OutboxMapper.toEntity(outbox1));
         em.persist(OutboxMapper.toEntity(outbox2));

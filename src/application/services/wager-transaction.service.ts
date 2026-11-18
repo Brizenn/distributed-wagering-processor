@@ -134,19 +134,19 @@ export class WagerTransactionService {
       // 4. Execute operation based on kind
       switch (dto.kind) {
         case WagerTransactionKind.Bet:
-          return await this.handleBet(em, wallet, tx, money, eventCtx);
+          return await this.handleBet(em, wallet, tx, money, eventCtx, walletEntity);
 
         case WagerTransactionKind.Win:
-          return await this.handleWin(em, wallet, tx, money, eventCtx);
+          return await this.handleWin(em, wallet, tx, money, eventCtx, walletEntity);
 
         case WagerTransactionKind.Loss:
           return await this.handleLoss(em, wallet, tx, eventCtx);
 
         case WagerTransactionKind.Refund:
-          return await this.handleRefund(em, wallet, tx, money, dto, eventCtx);
+          return await this.handleRefund(em, wallet, tx, money, dto, eventCtx, walletEntity);
 
         case WagerTransactionKind.Rollback:
-          return await this.handleRollback(em, wallet, tx, money, dto, eventCtx);
+          return await this.handleRollback(em, wallet, tx, money, dto, eventCtx, walletEntity);
 
         default:
           throw new ConflictError(`Unsupported transaction kind: ${dto.kind}`);
@@ -160,6 +160,7 @@ export class WagerTransactionService {
     tx: WagerTransaction,
     money: Money,
     eventCtx: { correlationId: string; causationId?: string },
+    walletEntity: WalletEntity,
   ): Promise<WagerResultDto> {
     if (wallet.balance.isLessThan(money)) {
       tx.reject(FailureCode.INSUFFICIENT_FUNDS);
@@ -182,12 +183,14 @@ export class WagerTransactionService {
     const ledgerEntry = wallet.debit(money, tx.id, ledgerId);
     tx.markProcessed();
 
-    const walletEntity = WalletMapper.toEntity(wallet);
+    WalletMapper.updateEntity(wallet, walletEntity);
     const txEntity = WagerTransactionMapper.toEntity(tx);
     const ledgerEntity = WalletLedgerMapper.toEntity(ledgerEntry);
 
     em.persist(walletEntity);
     em.persist(txEntity);
+    await em.flush?.();
+
     em.persist(ledgerEntity);
 
     const balanceChangedEvent = WalletBalanceChanged.from(wallet, ledgerEntry, eventCtx);
@@ -209,17 +212,20 @@ export class WagerTransactionService {
     tx: WagerTransaction,
     money: Money,
     eventCtx: { correlationId: string; causationId?: string },
+    walletEntity: WalletEntity,
   ): Promise<WagerResultDto> {
     const ledgerId = randomUUID();
     const ledgerEntry = wallet.credit(money, tx.id, ledgerId);
     tx.markProcessed();
 
-    const walletEntity = WalletMapper.toEntity(wallet);
+    WalletMapper.updateEntity(wallet, walletEntity);
     const txEntity = WagerTransactionMapper.toEntity(tx);
     const ledgerEntity = WalletLedgerMapper.toEntity(ledgerEntry);
 
     em.persist(walletEntity);
     em.persist(txEntity);
+    await em.flush?.();
+
     em.persist(ledgerEntity);
 
     const balanceChangedEvent = WalletBalanceChanged.from(wallet, ledgerEntry, eventCtx);
@@ -263,6 +269,7 @@ export class WagerTransactionService {
     money: Money,
     dto: ProcessWagerDto,
     eventCtx: { correlationId: string; causationId?: string },
+    walletEntity: WalletEntity,
   ): Promise<WagerResultDto> {
     // Look up referenced transaction
     const refEntity = await em.findOne(WagerTransactionEntity, {
@@ -329,8 +336,12 @@ export class WagerTransactionService {
     const ledgerEntry = wallet.credit(money, tx.id, ledgerId);
     tx.markProcessed(ref.id);
 
-    em.persist(WalletMapper.toEntity(wallet));
-    em.persist(WagerTransactionMapper.toEntity(tx));
+    WalletMapper.updateEntity(wallet, walletEntity);
+    const txEntity = WagerTransactionMapper.toEntity(tx);
+    em.persist(walletEntity);
+    em.persist(txEntity);
+    await em.flush?.();
+
     em.persist(WalletLedgerMapper.toEntity(ledgerEntry));
 
     em.persist(OutboxMapper.toEntity(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, eventCtx))));
@@ -351,6 +362,7 @@ export class WagerTransactionService {
     money: Money,
     dto: ProcessWagerDto,
     eventCtx: { correlationId: string; causationId?: string },
+    walletEntity: WalletEntity,
   ): Promise<WagerResultDto> {
     const refEntity = await em.findOne(WagerTransactionEntity, {
       providerId: dto.providerId,
@@ -434,8 +446,12 @@ export class WagerTransactionService {
 
     tx.markProcessed(ref.id);
 
-    em.persist(WalletMapper.toEntity(wallet));
-    em.persist(WagerTransactionMapper.toEntity(tx));
+    WalletMapper.updateEntity(wallet, walletEntity);
+    const txEntity = WagerTransactionMapper.toEntity(tx);
+    em.persist(walletEntity);
+    em.persist(txEntity);
+    await em.flush?.();
+
     em.persist(WalletLedgerMapper.toEntity(ledgerEntry));
 
     em.persist(OutboxMapper.toEntity(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, eventCtx))));

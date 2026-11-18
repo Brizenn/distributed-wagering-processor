@@ -15,6 +15,13 @@ export class WalletMapper {
     });
   }
 
+  public static updateEntity(domain: Wallet, target: WalletEntity): WalletEntity {
+    target.balance = domain.balance.amount;
+    target.version = domain.version;
+    target.updatedAt = domain.updatedAt;
+    return target;
+  }
+
   public static toEntity(domain: Wallet): WalletEntity {
     const entity = new WalletEntity();
     entity.id = domain.id;

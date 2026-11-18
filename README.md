@@ -75,7 +75,20 @@ bun run test:load
 
 ## Exemplos de Uso da API
 
-### Criar Carteira
+Abaixo você encontra o passo a passo completo para testar as operações financeiras.
+
+> **Importante**: No **Passo 1 (Criar Carteira)**, a API retornará o `id` da carteira criada. Copie esse ID e utilize-o nos comandos seguintes substituindo o valor de `walletId` ou no final da URL.
+
+---
+
+### Passo 1: Criar Carteira
+
+**PowerShell (Windows):**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/wallets" -ContentType "application/json" -Body '{"playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1", "initialBalance": {"amount": "100.00", "currency": "BRL"}}' | ConvertTo-Json
+```
+
+**Bash / Linux / macOS (cURL):**
 ```bash
 curl -X POST http://localhost:3000/wallets \
   -H "Content-Type: application/json" \
@@ -88,25 +101,50 @@ curl -X POST http://localhost:3000/wallets \
 Resposta esperada (HTTP 201):
 ```json
 {
-  "id": "0192f291-27dd-7d3f-8071-5f8685deef37",
+  "id": "2b99c51e-e4a2-40ac-b568-14fcd1e4a516",
   "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
   "balance": { "amount": "100.00", "currency": "BRL" },
   "version": 1
 }
 ```
 
-### Submeter Aposta (BET)
+---
+
+### Passo 2: Consultar Carteira
+Substitua o ID no final da URL pelo ID da carteira que você criou no Passo 1.
+
+**PowerShell:**
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516" | ConvertTo-Json
+```
+
+**Bash / cURL:**
+```bash
+curl -X GET http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516
+```
+
+---
+
+### Passo 3: Fazer uma Aposta (BET)
+Envie uma aposta de R$ 25,00 informando o `walletId` da carteira criada no Passo 1:
+
+**PowerShell:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/wagering/transactions" -ContentType "application/json" -Headers @{"Idempotency-Key"="prov-1:bet-101"} -Body '{"providerId":"prov-1","externalTransactionId":"bet-101","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"2b99c51e-e4a2-40ac-b568-14fcd1e4a516","roundId":"round-1","gameId":"fortune-tiger","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}' | ConvertTo-Json
+```
+
+**Bash / cURL:**
 ```bash
 curl -X POST http://localhost:3000/wagering/transactions \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: provider-a:bet-101" \
+  -H "Idempotency-Key: prov-1:bet-101" \
   -d '{
-    "providerId": "provider-a",
+    "providerId": "prov-1",
     "externalTransactionId": "bet-101",
     "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
-    "roundId": "round-987",
-    "gameId": "fortune-chimp",
+    "walletId": "2b99c51e-e4a2-40ac-b568-14fcd1e4a516",
+    "roundId": "round-1",
+    "gameId": "fortune-tiger",
     "kind": "BET",
     "money": { "amount": "25.00", "currency": "BRL" }
   }'
@@ -115,30 +153,63 @@ curl -X POST http://localhost:3000/wagering/transactions \
 Resposta esperada (HTTP 200):
 ```json
 {
-  "transactionId": "0192f298-345e-7e38-af88-e43f851a819d",
+  "transactionId": "67b839e7-463b-49e6-b66c-7b3029b2e6d1",
   "status": "PROCESSED",
   "balance": { "amount": "75.00", "currency": "BRL" },
   "idempotentReplay": false
 }
 ```
 
-Se o mesmo payload for reenviado com a mesma chave, a API retorna a mesma resposta com `"idempotentReplay": true`, sem duplicar o débito.
+---
 
-### Consultar Extrato (Ledger) com Paginação
-```bash
-curl -X GET "http://localhost:3000/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/ledger?limit=20"
+### Passo 4: Teste de Idempotência
+Reenvie exatamente o mesmo comando do Passo 3 (mesma `Idempotency-Key` e mesmo payload).
+
+A API responderá com `"idempotentReplay": true`, confirmando o processamento sem debitar a carteira uma segunda vez (saldo permanece em 75.00 BRL):
+
+```json
+{
+  "transactionId": "67b839e7-463b-49e6-b66c-7b3029b2e6d1",
+  "status": "PROCESSED",
+  "balance": { "amount": "75.00", "currency": "BRL" },
+  "idempotentReplay": true
+}
 ```
 
-### Reconciliação Contábil da Carteira
-Valida a paridade entre o saldo materializado na carteira e a soma de todos os lançamentos históricos do ledger:
+---
+
+### Passo 5: Consultar Extrato (Ledger)
+Lista os lançamentos contábeis históricos da carteira (crédito inicial de abertura e o débito da aposta):
+
+**PowerShell:**
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516/ledger" | ConvertTo-Json
+```
+
+**Bash / cURL:**
 ```bash
-curl -X POST http://localhost:3000/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/reconciliation
+curl -X GET "http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516/ledger?limit=20"
+```
+
+---
+
+### Passo 6: Reconciliação Contábil da Carteira
+Valida se a soma matemática de todo o histórico do ledger coincide exatamente com o saldo armazenado na carteira:
+
+**PowerShell:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516/reconciliation" | ConvertTo-Json
+```
+
+**Bash / cURL:**
+```bash
+curl -X POST http://localhost:3000/wallets/2b99c51e-e4a2-40ac-b568-14fcd1e4a516/reconciliation
 ```
 
 Resposta esperada:
 ```json
 {
-  "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+  "walletId": "2b99c51e-e4a2-40ac-b568-14fcd1e4a516",
   "storedBalance":     { "amount": "75.00", "currency": "BRL" },
   "calculatedBalance": { "amount": "75.00", "currency": "BRL" },
   "difference":        { "amount": "0.00",  "currency": "BRL" },
@@ -147,15 +218,26 @@ Resposta esperada:
 }
 ```
 
-### Health Checks e Métricas
-```bash
+---
+
+### Passo 7: Health Checks e Métricas
+
+**PowerShell:**
+```powershell
 # Liveness
-curl http://localhost:3000/health/live
+Invoke-RestMethod -Method Get -Uri "http://localhost:3000/health/live" | ConvertTo-Json
 
 # Readiness (valida conectividade com PostgreSQL)
-curl http://localhost:3000/health/ready
+Invoke-RestMethod -Method Get -Uri "http://localhost:3000/health/ready" | ConvertTo-Json
 
-# Métricas internas de processamento
+# Métricas internas
+Invoke-RestMethod -Method Get -Uri "http://localhost:3000/health/metrics" | ConvertTo-Json
+```
+
+**Bash / cURL:**
+```bash
+curl http://localhost:3000/health/live
+curl http://localhost:3000/health/ready
 curl http://localhost:3000/health/metrics
 ```
 
