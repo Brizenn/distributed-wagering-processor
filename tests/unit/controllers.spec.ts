@@ -125,20 +125,36 @@ describe('Presentation Controllers (Unit)', () => {
     expect(responseStatus).toBe(422);
   });
 
-  it('should return health liveness and metrics snapshot', () => {
+  it('should return health liveness and metrics snapshot', async () => {
     const metricsService = new MetricsService();
     metricsService.recordTransactionStatus('PROCESSED');
     metricsService.recordDuplicateDetected();
 
     const mockEm: any = {};
-    const healthController = new HealthController(mockEm, metricsService);
+    const mockSqs: any = {
+      checkReady: async () => {},
+      getDlqApproximateMessageCount: async () => 0,
+    };
+    const healthController = new HealthController(mockEm, metricsService, mockSqs);
 
     const live = healthController.getLive();
     expect(live.status).toBe('UP');
     expect(live.uptime).toBeGreaterThanOrEqual(0);
 
-    const metrics: any = healthController.getMetrics();
+    const metrics: any = await healthController.getMetrics();
     expect(metrics.transactions.PROCESSED).toBe(1);
     expect(metrics.duplicatesDetected).toBe(1);
+  });
+
+  it('requires an Idempotency-Key header and returns a stable failure code', async () => {
+    const controller = new WageringController({} as any, new MetricsService(), {} as any);
+    const response: any = { status: () => response, json: () => {} };
+    await expect(
+      controller.submitTransaction({} as any, undefined, undefined, response),
+    ).rejects.toMatchObject({
+      response: {
+        failureCode: 'IDEMPOTENCY_KEY_REQUIRED',
+      },
+    });
   });
 });

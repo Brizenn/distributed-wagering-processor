@@ -6,6 +6,7 @@ import { WagerTransactionEntity } from '../../src/infrastructure/database/entiti
 import { WalletLedgerEntity } from '../../src/infrastructure/database/entities/wallet-ledger.entity';
 import { WagerTransactionKind, WagerTransactionStatus } from '../../src/domain/wagering/wager-transaction';
 import { FailureCode } from '../../src/domain/wagering/failure-code';
+import { MetricsService } from '../../src/observability/metrics.service';
 import Decimal from 'decimal.js';
 
 describe('Concurrency & Race Condition Scenarios', () => {
@@ -14,7 +15,7 @@ describe('Concurrency & Race Condition Scenarios', () => {
   let ledgerEntries: WalletLedgerEntity[];
   let idempotencyService: IdempotencyService;
 
-  // Mutex simulation for row-level pessimistic locking (LockMode.PESSIMISTIC_WRITE)
+  // Unit-level simulation of PostgreSQL transaction/advisory/row locks.
   const walletLocks = new Map<string, Promise<void>>();
 
   function acquireLock(walletId: string): Promise<() => void> {
@@ -29,76 +30,81 @@ describe('Concurrency & Race Condition Scenarios', () => {
   }
 
   function createMockEm() {
-    const em: any = {
-      fork: () => em,
-      transactional: async (callback: any) => {
-        return await callback(em);
-      },
-      findOne: async (entityClass: any, filter: any, options?: any) => {
-        if (entityClass === WalletEntity) {
-          if (options?.lockMode) {
-            // Emulate database row lock wait
-            await new Promise((r) => setTimeout(r, 5));
+    const makeTransactionEm = (releases: Array<() => void>, held: Set<string>) => {
+      const acquire = async (key: string) => {
+        if (held.has(key)) return;
+        held.add(key);
+        releases.push(await acquireLock(key));
+      };
+      const em: any = {
+        getConnection: () => ({
+          execute: async (_query: string, params: string[]) => {
+            await acquire(`advisory:${params[0]}`);
+            return [];
+          },
+        }),
+        transactional: async (callback: any) => callback(em),
+        findOne: async (entityClass: any, filter: any, options?: any) => {
+          if (entityClass === WalletEntity) {
+            if (options?.lockMode) await acquire(`wallet:${filter.id}`);
+            const w = wallets.get(filter.id);
+            if (!w) return null;
+            const clone = new WalletEntity();
+            Object.assign(clone, w);
+            return clone;
           }
-          const w = wallets.get(filter.id);
-          if (!w) return null;
-          // Return a clone to simulate database isolation
-          const clone = new WalletEntity();
-          Object.assign(clone, w);
-          return clone;
-        }
-        if (entityClass === WagerTransactionEntity) {
-          if (filter.$or) {
-            for (const cond of filter.$or) {
-              if (cond.idempotencyKey) {
-                const found = Array.from(transactions.values()).find(
-                  (t) => t.idempotencyKey === cond.idempotencyKey,
-                );
-                if (found) return found;
-              }
-              if (cond.providerId && cond.externalTransactionId) {
-                const found = Array.from(transactions.values()).find(
-                  (t) =>
-                    t.providerId === cond.providerId &&
-                    t.externalTransactionId === cond.externalTransactionId,
-                );
-                if (found) return found;
-              }
+          if (entityClass === WagerTransactionEntity) {
+            if (filter.id) return transactions.get(filter.id) ?? null;
+            if (filter.idempotencyKey) {
+              return Array.from(transactions.values()).find(
+                (t) => t.idempotencyKey === filter.idempotencyKey,
+              ) ?? null;
             }
-            return null;
-          }
-          if (filter.providerId && filter.externalTransactionId) {
-            return (
-              Array.from(transactions.values()).find(
-                (t) =>
-                  t.providerId === filter.providerId &&
+            if (filter.providerId && filter.externalTransactionId) {
+              return Array.from(transactions.values()).find(
+                (t) => t.providerId === filter.providerId &&
                   t.externalTransactionId === filter.externalTransactionId,
-              ) ?? null
-            );
+              ) ?? null;
+            }
+            if (filter.referenceTransactionId) {
+              return Array.from(transactions.values()).find(
+                (t) => t.referenceTransactionId === filter.referenceTransactionId &&
+                  t.kind === filter.kind && t.status === filter.status,
+              ) ?? null;
+            }
           }
-        }
-        return null;
-      },
-      persist: (e: any) => {
-        if (e instanceof WalletEntity) {
-          wallets.set(e.id, e);
-        }
-        if (e instanceof WagerTransactionEntity) {
-          transactions.set(e.id, e);
-        }
-        if (e instanceof WalletLedgerEntity) {
-          ledgerEntries.push(e);
-        }
-      },
-      flush: async () => {},
+          return null;
+        },
+        persist: (entity: any) => {
+          if (entity instanceof WalletEntity) wallets.set(entity.id, entity);
+          if (entity instanceof WagerTransactionEntity) transactions.set(entity.id, entity);
+          if (entity instanceof WalletLedgerEntity) ledgerEntries.push(entity);
+        },
+        flush: async () => {},
+      };
+      return em;
     };
-    return em;
+
+    const root: any = {
+      fork: () => root,
+      transactional: async (callback: any) => {
+        const releases: Array<() => void> = [];
+        const held = new Set<string>();
+        try {
+          return await callback(makeTransactionEm(releases, held));
+        } finally {
+          for (const release of releases.reverse()) release();
+        }
+      },
+    };
+    return root;
   }
 
   beforeEach(() => {
     wallets = new Map();
     transactions = new Map();
     ledgerEntries = [];
+    walletLocks.clear();
     idempotencyService = new IdempotencyService();
 
     const initialWallet = new WalletEntity();
@@ -126,14 +132,11 @@ describe('Concurrency & Race Condition Scenarios', () => {
   it('Mandatory Section 8: Two simultaneous 80.00 BRL bets on 100.00 BRL wallet', async () => {
     const em1 = createMockEm();
     const em2 = createMockEm();
-    const service1 = new WagerTransactionService(em1, idempotencyService);
-    const service2 = new WagerTransactionService(em2, idempotencyService);
+    const service1 = new WagerTransactionService(em1, idempotencyService, new MetricsService());
+    const service2 = new WagerTransactionService(em2, idempotencyService, new MetricsService());
 
     // Run both bets concurrently
-    const bet1Promise = (async () => {
-      const release = await acquireLock('wallet-hot-1');
-      try {
-        return await service1.processTransaction({
+    const bet1Promise = service1.processTransaction({
           providerId: 'provider-a',
           externalTransactionId: 'bet-simul-1',
           playerId: 'player-1',
@@ -143,15 +146,8 @@ describe('Concurrency & Race Condition Scenarios', () => {
           kind: WagerTransactionKind.Bet,
           money: { amount: '80.00', currency: 'BRL' },
         });
-      } finally {
-        release();
-      }
-    })();
 
-    const bet2Promise = (async () => {
-      const release = await acquireLock('wallet-hot-1');
-      try {
-        return await service2.processTransaction({
+    const bet2Promise = service2.processTransaction({
           providerId: 'provider-b',
           externalTransactionId: 'bet-simul-2',
           playerId: 'player-1',
@@ -161,10 +157,6 @@ describe('Concurrency & Race Condition Scenarios', () => {
           kind: WagerTransactionKind.Bet,
           money: { amount: '80.00', currency: 'BRL' },
         });
-      } finally {
-        release();
-      }
-    })();
 
     const [result1, result2] = await Promise.all([bet1Promise, bet2Promise]);
 
@@ -207,7 +199,7 @@ describe('Concurrency & Race Condition Scenarios', () => {
    */
   it('Mandatory Section 13: The same bet sent 50 times in parallel', async () => {
     const mockEm = createMockEm();
-    const service = new WagerTransactionService(mockEm, idempotencyService);
+    const service = new WagerTransactionService(mockEm, idempotencyService, new MetricsService());
 
     const betDto = {
       providerId: 'provider-a',
@@ -221,16 +213,9 @@ describe('Concurrency & Race Condition Scenarios', () => {
     };
 
     // Execute 50 requests in parallel
-    const promises = Array.from({ length: 50 }, async () => {
-      const release = await acquireLock('wallet-hot-1');
-      try {
-        return await service.processTransaction(betDto, {
-          idempotencyKey: 'provider-a:bet-repeat-50',
-        });
-      } finally {
-        release();
-      }
-    });
+    const promises = Array.from({ length: 50 }, () => service.processTransaction(betDto, {
+      idempotencyKey: 'provider-a:bet-repeat-50',
+    }));
 
     const responses = await Promise.all(promises);
 
@@ -267,7 +252,7 @@ describe('Concurrency & Race Condition Scenarios', () => {
     wallets.set(w2.id, w2);
 
     const mockEm = createMockEm();
-    const service = new WagerTransactionService(mockEm, idempotencyService);
+    const service = new WagerTransactionService(mockEm, idempotencyService, new MetricsService());
 
     const op1 = service.processTransaction({
       providerId: 'prv-1',

@@ -3,12 +3,14 @@ import type { Response } from 'express';
 import { EntityManager } from '@mikro-orm/postgresql';
 import { Public } from '../auth/public.decorator';
 import { MetricsService } from '../metrics/metrics.service';
+import { SqsService } from '../../infrastructure/messaging/sqs.client';
 
 @Controller('health')
 export class HealthController {
   constructor(
     private readonly em: EntityManager,
     private readonly metricsService: MetricsService,
+    private readonly sqsService: SqsService,
   ) {}
 
   @Public()
@@ -24,28 +26,32 @@ export class HealthController {
   @Public()
   @Get('ready')
   public async getReady(@Res() res: Response): Promise<void> {
-    try {
-      // Verify PostgreSQL database connectivity
-      await this.em.getConnection().execute('SELECT 1');
+    const [databaseResult, sqsResult] = await Promise.allSettled([
+      this.em.getConnection().execute('SELECT 1'),
+      this.sqsService.checkReady(),
+    ]);
+    const database = databaseResult.status === 'fulfilled' ? 'connected' : 'unavailable';
+    const sqs = sqsResult.status === 'fulfilled' ? 'connected' : 'unavailable';
+    const ready = database === 'connected' && sqs === 'connected';
 
-      res.status(HttpStatus.OK).json({
-        status: 'UP',
-        database: 'connected',
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
-        status: 'DOWN',
-        database: 'disconnected',
-        error: err.message,
-        timestamp: new Date().toISOString(),
-      });
-    }
+    res.status(ready ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE).json({
+      status: ready ? 'UP' : 'DOWN',
+      database,
+      sqs,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   @Public()
   @Get('metrics')
-  public getMetrics(): Record<string, unknown> {
+  public async getMetrics(): Promise<Record<string, unknown>> {
+    try {
+      this.metricsService.setDlqMessageCount(
+        await this.sqsService.getDlqApproximateMessageCount(),
+      );
+    } catch {
+      // Keep the last known gauge if SQS is temporarily unreachable.
+    }
     return this.metricsService.getSnapshot();
   }
 }

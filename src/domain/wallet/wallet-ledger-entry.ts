@@ -41,6 +41,19 @@ export class WalletLedgerEntry {
   ) {}
 
   public static create(props: CreateLedgerEntryProps): WalletLedgerEntry {
+    if (props.money.isNegative()) {
+      throw new LedgerImbalanceError('Ledger amount cannot be negative');
+    }
+    if (props.balanceBefore.isNegative() || props.balanceAfter.isNegative()) {
+      throw new LedgerImbalanceError('Ledger balances cannot be negative');
+    }
+    if (
+      props.money.currency !== props.balanceBefore.currency ||
+      props.money.currency !== props.balanceAfter.currency
+    ) {
+      throw new LedgerImbalanceError('Ledger amounts and balances must use the same currency');
+    }
+
     const entry = new WalletLedgerEntry(
       props.id,
       props.walletId,

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { ProcessWagerDto } from '../dto/process-wager.dto';
+import { Money } from '../../domain/common/money';
 
 @Injectable()
 export class IdempotencyService {
@@ -9,13 +10,14 @@ export class IdempotencyService {
    * of the business fields in a wager transaction.
    */
   public computePayloadHash(dto: ProcessWagerDto): string {
+    const money = Money.from(dto.money);
     const canonicalBusinessPayload = {
       externalTransactionId: dto.externalTransactionId,
       gameId: dto.gameId,
       kind: dto.kind,
       money: {
-        amount: Number(dto.money.amount).toFixed(2),
-        currency: dto.money.currency.trim().toUpperCase(),
+        amount: money.amount,
+        currency: money.currency,
       },
       playerId: dto.playerId,
       providerId: dto.providerId,

@@ -3,6 +3,7 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { SqsService } from './sqs.client';
 import { OutboxEntity } from '../database/entities/outbox.entity';
 import { OutboxMapper } from '../database/mappers/outbox.mapper';
+import { MetricsService } from '../../observability/metrics.service';
 
 @Injectable()
 export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
@@ -14,6 +15,7 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly em: EntityManager,
     private readonly sqsService: SqsService,
+    private readonly metricsService: MetricsService,
   ) {}
 
   public onModuleInit(): void {
@@ -62,8 +64,14 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
     let publishedCount = 0;
 
     await forkEm.transactional(async (em) => {
-      // Claim records safely with FOR UPDATE SKIP LOCKED
       const conn = em.getConnection();
+      const lagRows = await conn.execute(
+        `SELECT EXTRACT(EPOCH FROM (NOW() - MIN(occurred_at))) * 1000 AS lag_ms
+         FROM outbox WHERE published_at IS NULL`,
+      );
+      this.metricsService.recordOutboxLag(Number(lagRows?.[0]?.lag_ms ?? 0));
+
+      // Claim due records safely with FOR UPDATE SKIP LOCKED.
       const rawRows = await conn.execute(
         `SELECT id FROM outbox
          WHERE published_at IS NULL
@@ -80,14 +88,13 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
 
       const ids = rawRows.map((r: any) => r.id);
       const entities = await em.find(OutboxEntity, { id: { $in: ids } });
-
       for (const entity of entities) {
         const domainOutbox = OutboxMapper.toDomain(entity);
         try {
-          // Send event to SQS Main Queue with FIFO deduplication
+          // Send event to the dedicated SQS FIFO events queue.
           const payloadString = JSON.stringify(domainOutbox.payload);
           await this.sqsService.sendMessage(
-            this.sqsService.getMainQueueUrl(),
+            this.sqsService.getOutboxQueueUrl(),
             payloadString,
             domainOutbox.aggregateId, // MessageGroupId: guarantees order per wallet/aggregate
             domainOutbox.id,          // MessageDeduplicationId
@@ -97,9 +104,15 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
           entity.publishedAt = domainOutbox.publishedAt;
           publishedCount += 1;
         } catch (dispatchErr: any) {
-          this.logger.warn(
-            `Failed to dispatch outbox message ${domainOutbox.id}: ${dispatchErr.message}. Scheduling retry.`,
-          );
+          this.logger.warn(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: 'WARN',
+            event: 'OutboxDispatchFailed',
+            eventId: domainOutbox.id,
+            eventType: domainOutbox.eventType,
+            aggregateId: domainOutbox.aggregateId,
+            errorName: dispatchErr instanceof Error ? dispatchErr.name : 'UnknownError',
+          }));
           domainOutbox.scheduleRetry();
           entity.attempts = domainOutbox.attempts;
           entity.nextAttemptAt = domainOutbox.nextAttemptAt;

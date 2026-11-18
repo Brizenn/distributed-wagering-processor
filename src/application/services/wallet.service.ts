@@ -25,6 +25,7 @@ import { WalletMapper } from '../../infrastructure/database/mappers/wallet.mappe
 import { WagerTransactionMapper } from '../../infrastructure/database/mappers/wager-transaction.mapper';
 import { WalletLedgerMapper } from '../../infrastructure/database/mappers/wallet-ledger.mapper';
 import { OutboxMapper } from '../../infrastructure/database/mappers/outbox.mapper';
+import { MetricsService } from '../../observability/metrics.service';
 
 export interface LedgerPaginationResult {
   entries: Array<{
@@ -53,7 +54,10 @@ export interface ReconciliationResult {
 export class WalletService {
   private readonly logger = new Logger(WalletService.name);
 
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly metricsService: MetricsService,
+  ) {}
 
   public async openWallet(dto: CreateWalletDto): Promise<{
     id: string;
@@ -107,7 +111,7 @@ export class WalletService {
         });
         openingTx.markProcessed(undefined, now);
 
-        const txEntity = WagerTransactionMapper.toEntity(openingTx);
+        const txEntity = WagerTransactionMapper.toEntity(openingTx, initialMoney);
         em.persist(txEntity);
         await em.flush?.();
 
@@ -255,6 +259,7 @@ export class WalletService {
     const consistent = diff.isZero();
 
     if (!consistent) {
+      this.metricsService.recordReconciliationDivergence();
       this.logger.warn({
         event: 'ReconciliationDivergenceDetected',
         walletId,
@@ -269,7 +274,7 @@ export class WalletService {
       walletId,
       storedBalance: { amount: stored.toFixed(2), currency: walletEntity.currency },
       calculatedBalance: { amount: calculated.toFixed(2), currency: walletEntity.currency },
-      difference: { amount: diff.abs().toFixed(2), currency: walletEntity.currency },
+      difference: { amount: diff.toFixed(2), currency: walletEntity.currency },
       consistent,
       checkedEntries: entries.length,
     };

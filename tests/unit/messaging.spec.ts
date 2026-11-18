@@ -18,6 +18,7 @@ describe('Messaging Layer (Unit)', () => {
     deletedMessages = [];
     mockSqsService = {
       getMainQueueUrl: () => 'http://localhost:4566/main.fifo',
+      getOutboxQueueUrl: () => 'http://localhost:4566/events.fifo',
       getDlqUrl: () => 'http://localhost:4566/dlq.fifo',
       sendMessage: async (url: string, body: string, groupId: string, dedupId: string) => {
         sentMessages.push({ url, body, groupId, dedupId });
@@ -49,7 +50,7 @@ describe('Messaging Layer (Unit)', () => {
         flush: async () => {},
       };
 
-      const publisher = new OutboxPublisher(mockEm, mockSqsService);
+      const publisher = new OutboxPublisher(mockEm, mockSqsService, new MetricsService());
       const count = await publisher.publishPendingMessages();
 
       expect(count).toBe(1);
@@ -85,7 +86,7 @@ describe('Messaging Layer (Unit)', () => {
         flush: async () => {},
       };
 
-      const publisher = new OutboxPublisher(mockEm, failingSqs);
+      const publisher = new OutboxPublisher(mockEm, failingSqs, new MetricsService());
       const count = await publisher.publishPendingMessages();
 
       expect(count).toBe(0);
@@ -139,6 +140,7 @@ describe('Messaging Layer (Unit)', () => {
             gameId: 'g-1',
             kind: WagerTransactionKind.Bet,
             money: { amount: '10.00', currency: 'BRL' },
+            idempotencyKey: 'prv-1:ext-1',
           },
         }),
       };
@@ -160,56 +162,24 @@ describe('Messaging Layer (Unit)', () => {
   });
 
   describe('PendingReferenceWorker', () => {
-    it('should reprocess pending transaction when reference transaction becomes available', async () => {
-      const pendingTx = new WagerTransactionEntity();
-      pendingTx.id = 'tx-refund-pending';
-      pendingTx.providerId = 'prv-1';
-      pendingTx.externalTransactionId = 'ext-refund';
-      pendingTx.referenceExternalTransactionId = 'ext-bet';
-      pendingTx.walletId = 'w-1';
-      pendingTx.playerId = 'p-1';
-      pendingTx.roundId = 'r-1';
-      pendingTx.gameId = 'g-1';
-      pendingTx.kind = WagerTransactionKind.Refund;
-      pendingTx.amount = '20.00';
-      pendingTx.currency = 'BRL';
-      pendingTx.status = WagerTransactionStatus.PendingReference;
-      pendingTx.createdAt = new Date();
-
-      const processedBet = new WagerTransactionEntity();
-      processedBet.id = 'tx-bet-original';
-      processedBet.providerId = 'prv-1';
-      processedBet.externalTransactionId = 'ext-bet';
-      processedBet.status = WagerTransactionStatus.Processed;
-
-      let reprocessedCalls: any[] = [];
+    it('delegates each due row to an atomic retry and never deletes the pending transaction', async () => {
+      const retriedIds: string[] = [];
       const mockWagerService: any = {
-        processTransaction: async (dto: any) => {
-          reprocessedCalls.push(dto);
-          return { status: WagerTransactionStatus.Processed };
+        retryPendingReference: async (id: string) => {
+          retriedIds.push(id);
+          return true;
         },
       };
-
       const mockEm: any = {
         fork: () => mockEm,
-        transactional: async (cb: any) => cb(mockEm),
-        find: async () => [pendingTx],
-        findOne: async (_cls: any, filter: any) => {
-          if (filter.externalTransactionId === 'ext-bet') {
-            return processedBet;
-          }
-          return null;
-        },
-        removeAndFlush: async () => {},
-        flush: async () => {},
+        getConnection: () => ({ execute: async () => [{ id: 'tx-refund-pending' }] }),
       };
 
       const worker = new PendingReferenceWorker(mockEm, mockWagerService);
       const handled = await worker.reprocessPendingReferences();
 
       expect(handled).toBe(1);
-      expect(reprocessedCalls.length).toBe(1);
-      expect(reprocessedCalls[0].externalTransactionId).toBe('ext-refund');
+      expect(retriedIds).toEqual(['tx-refund-pending']);
     });
   });
 });

@@ -1,5 +1,6 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Get,
   Headers,
@@ -16,6 +17,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { WagerTransactionEntity } from '../../infrastructure/database/entities/wager-transaction.entity';
 import { NotFoundError } from '../../application/errors/application-error';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
+import { FailureCode } from '../../domain/wagering/failure-code';
 
 @Controller()
 export class WageringController {
@@ -32,8 +34,22 @@ export class WageringController {
     @Headers('x-correlation-id') correlationId: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
+    const idempotencyKey = idempotencyKeyHeader?.trim();
+    if (!idempotencyKey) {
+      throw new BadRequestException({
+        failureCode: FailureCode.IDEMPOTENCY_KEY_REQUIRED,
+        message: 'Idempotency-Key header is required',
+      });
+    }
+    if (idempotencyKey.length > 255) {
+      throw new BadRequestException({
+        failureCode: FailureCode.INVALID_IDEMPOTENCY_KEY,
+        message: 'Idempotency-Key must be at most 255 characters',
+      });
+    }
+
     const result = await this.wagerService.processTransaction(dto, {
-      idempotencyKey: idempotencyKeyHeader,
+      idempotencyKey,
       correlationId,
     });
 

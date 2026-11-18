@@ -5,16 +5,16 @@ import { DatabaseModule } from '../infrastructure/database/database.module';
 import { WalletsController } from './controllers/wallets.controller';
 import { WageringController } from './controllers/wagering.controller';
 import { HealthController } from './controllers/health.controller';
-import { MetricsService } from './metrics/metrics.service';
 import { ProviderAuthGuard } from './auth/auth.guard';
 import { LoggingInterceptor } from './interceptors/logging.interceptor';
 import { GlobalExceptionFilter } from './filters/global-exception.filter';
+import { MetricsModule } from '../observability/metrics.module';
+import { SqsClientModule } from '../infrastructure/messaging/sqs-client.module';
 
 @Module({
-  imports: [ApplicationModule, DatabaseModule],
+  imports: [ApplicationModule, DatabaseModule, MetricsModule, SqsClientModule],
   controllers: [WalletsController, WageringController, HealthController],
   providers: [
-    MetricsService,
     {
       provide: APP_GUARD,
       useClass: ProviderAuthGuard,
@@ -28,6 +28,5 @@ import { GlobalExceptionFilter } from './filters/global-exception.filter';
       useClass: GlobalExceptionFilter,
     },
   ],
-  exports: [MetricsService],
 })
 export class PresentationModule {}

@@ -6,6 +6,7 @@ import { WalletLedgerEntity } from './entities/wallet-ledger.entity';
 import { InboxEntity } from './entities/inbox.entity';
 import { OutboxEntity } from './entities/outbox.entity';
 import { Migration20261117000001_InitialSchema } from './migrations/Migration20261117000001_InitialSchema';
+import { Migration20261118000002_StrengthenFinancialInvariants } from './migrations/Migration20261118000002_StrengthenFinancialInvariants';
 
 export default defineConfig({
   driver: PostgreSqlDriver,
@@ -30,6 +31,10 @@ export default defineConfig({
       {
         name: 'Migration20261117000001_InitialSchema',
         class: Migration20261117000001_InitialSchema,
+      },
+      {
+        name: 'Migration20261118000002_StrengthenFinancialInvariants',
+        class: Migration20261118000002_StrengthenFinancialInvariants,
       },
     ],
     transactional: true,

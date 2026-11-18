@@ -7,7 +7,11 @@ export class ApplicationError extends Error {
 }
 
 export class NotFoundError extends ApplicationError {}
-export class ConflictError extends ApplicationError {}
+export class ConflictError extends ApplicationError {
+  constructor(message: string, public readonly failureCode?: string) {
+    super(message);
+  }
+}
 export class BusinessRejectionError extends ApplicationError {
   constructor(
     message: string,
