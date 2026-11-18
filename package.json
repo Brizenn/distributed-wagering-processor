@@ -12,7 +12,9 @@
     "test:integration": "bun test tests/integration",
     "test:concurrency": "bun test tests/concurrency",
     "test:load": "bun run scripts/load-test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "migration:up": "bun run scripts/migrate.ts",
+    "migration:create": "mikro-orm migration:create"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.758.0",
@@ -31,6 +33,7 @@
     "rxjs": "^7.8.2"
   },
   "devDependencies": {
+    "@mikro-orm/cli": "^6.4.8",
     "@types/express": "^5.0.6",
     "@types/node": "^22.13.9",
     "@types/pg": "^8.11.11",

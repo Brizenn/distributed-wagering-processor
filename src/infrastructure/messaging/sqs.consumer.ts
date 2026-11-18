@@ -32,8 +32,9 @@ export class SqsConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly metricsService: MetricsService,
   ) {}
 
-  public onModuleInit(): void {
+  public async onModuleInit(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
+      await this.sqsService.ensureQueues();
       this.startConsuming();
     }
   }

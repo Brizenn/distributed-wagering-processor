@@ -1,15 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   SQSClient,
   SendMessageCommand,
   ReceiveMessageCommand,
   DeleteMessageCommand,
   ChangeMessageVisibilityCommand,
+  CreateQueueCommand,
+  GetQueueAttributesCommand,
   Message,
 } from '@aws-sdk/client-sqs';
 
 @Injectable()
-export class SqsService {
+export class SqsService implements OnModuleInit {
   private readonly logger = new Logger(SqsService.name);
   private readonly client: SQSClient;
   private readonly mainQueueUrl: string;
@@ -34,6 +36,60 @@ export class SqsService {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'test',
       },
     });
+  }
+
+  public async onModuleInit(): Promise<void> {
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
+    await this.ensureQueues();
+  }
+
+  public async ensureQueues(): Promise<void> {
+    try {
+      // 1. Ensure DLQ exists
+      await this.client.send(
+        new CreateQueueCommand({
+          QueueName: 'wager-transactions-dlq.fifo',
+          Attributes: {
+            FifoQueue: 'true',
+            ContentBasedDeduplication: 'false',
+          },
+        }),
+      );
+
+      // 2. Fetch DLQ ARN
+      const dlqAttrs = await this.client.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: this.dlqUrl,
+          AttributeNames: ['QueueArn'],
+        }),
+      );
+      const dlqArn = dlqAttrs.Attributes?.QueueArn;
+
+      // 3. Ensure Main Queue exists with DLQ Redrive policy
+      const mainAttrs: Record<string, string> = {
+        FifoQueue: 'true',
+        ContentBasedDeduplication: 'false',
+      };
+      if (dlqArn) {
+        mainAttrs.RedrivePolicy = JSON.stringify({
+          deadLetterTargetArn: dlqArn,
+          maxReceiveCount: '3',
+        });
+      }
+
+      await this.client.send(
+        new CreateQueueCommand({
+          QueueName: 'wager-transactions.fifo',
+          Attributes: mainAttrs,
+        }),
+      );
+
+      this.logger.log('SQS FIFO queues verified and ready.');
+    } catch (err: any) {
+      this.logger.warn(`Could not auto-create SQS queues: ${err.message}`);
+    }
   }
 
   public async sendMessage(
