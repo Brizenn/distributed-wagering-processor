@@ -30,8 +30,18 @@ export class WagerTransactionMapper {
     });
   }
 
-  public static toEntity(domain: WagerTransaction): WagerTransactionEntity {
-    const entity = new WagerTransactionEntity();
+  public static toEntity(
+    domain: WagerTransaction,
+    resultBalance?: Money,
+  ): WagerTransactionEntity {
+    return this.updateEntity(domain, new WagerTransactionEntity(), resultBalance);
+  }
+
+  public static updateEntity(
+    domain: WagerTransaction,
+    entity: WagerTransactionEntity,
+    resultBalance?: Money,
+  ): WagerTransactionEntity {
     entity.id = domain.id;
     entity.providerId = domain.providerId;
     entity.externalTransactionId = domain.externalTransactionId;
@@ -50,6 +60,15 @@ export class WagerTransactionMapper {
     entity.failureCode = domain.failureCode;
     entity.createdAt = domain.createdAt;
     entity.processedAt = domain.processedAt;
+    if (resultBalance) {
+      entity.resultBalanceAmount = resultBalance.amount;
+      entity.resultBalanceCurrency = resultBalance.currency;
+    }
+    if (domain.status === WagerTransactionStatus.PendingReference) {
+      entity.referenceNextAttemptAt ??= new Date(Date.now() + 1000);
+    } else {
+      entity.referenceNextAttemptAt = undefined;
+    }
     return entity;
   }
 }

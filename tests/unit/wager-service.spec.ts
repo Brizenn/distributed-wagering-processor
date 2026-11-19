@@ -6,6 +6,7 @@ import { FailureCode } from '../../src/domain/wagering/failure-code';
 import { ConflictError } from '../../src/application/errors/application-error';
 import { WalletEntity } from '../../src/infrastructure/database/entities/wallet.entity';
 import { WagerTransactionEntity } from '../../src/infrastructure/database/entities/wager-transaction.entity';
+import { MetricsService } from '../../src/observability/metrics.service';
 
 describe('WagerTransactionService (Unit)', () => {
   let service: WagerTransactionService;
@@ -34,29 +35,19 @@ describe('WagerTransactionService (Unit)', () => {
     const mockEm: any = {
       flush: async () => {},
       transactional: async (cb: any) => cb(mockEm),
+      getConnection: () => ({ execute: async () => [] }),
       findOne: async (entityClass: any, filter: any) => {
         if (entityClass === WalletEntity) {
           return wallets.get(filter.id) ?? null;
         }
         if (entityClass === WagerTransactionEntity) {
-          if (filter.$or) {
-            for (const cond of filter.$or) {
-              if (cond.idempotencyKey) {
-                const found = Array.from(transactions.values()).find(
-                  (t) => t.idempotencyKey === cond.idempotencyKey,
-                );
-                if (found) return found;
-              }
-              if (cond.providerId && cond.externalTransactionId) {
-                const found = Array.from(transactions.values()).find(
-                  (t) =>
-                    t.providerId === cond.providerId &&
-                    t.externalTransactionId === cond.externalTransactionId,
-                );
-                if (found) return found;
-              }
-            }
-            return null;
+          if (filter.id) {
+            return transactions.get(filter.id) ?? null;
+          }
+          if (filter.idempotencyKey) {
+            return Array.from(transactions.values()).find(
+              (t) => t.idempotencyKey === filter.idempotencyKey,
+            ) ?? null;
           }
           if (filter.providerId && filter.externalTransactionId) {
             return (
@@ -92,7 +83,7 @@ describe('WagerTransactionService (Unit)', () => {
     };
 
     idempotencyService = new IdempotencyService();
-    service = new WagerTransactionService(mockEm, idempotencyService);
+    service = new WagerTransactionService(mockEm, idempotencyService, new MetricsService());
   });
 
   it('should process a valid BET and decrease balance', async () => {
@@ -192,6 +183,47 @@ describe('WagerTransactionService (Unit)', () => {
 
     // Balance should have been debited only once (100 - 20 = 80)
     expect(wallets.get('w-1')?.balance).toBe('80.00');
+  });
+
+  it('should replay the original balance snapshot after later wallet activity', async () => {
+    const bet = {
+      providerId: 'provider-1',
+      externalTransactionId: 'tx-snapshot-1',
+      playerId: 'p-1',
+      walletId: 'w-1',
+      roundId: 'round-1',
+      gameId: 'fortune-tiger',
+      kind: WagerTransactionKind.Bet,
+      money: { amount: '20.00', currency: 'BRL' },
+    };
+    const first = await service.processTransaction(bet);
+    await service.processTransaction({
+      ...bet,
+      externalTransactionId: 'tx-snapshot-win',
+      kind: WagerTransactionKind.Win,
+      money: { amount: '10.00', currency: 'BRL' },
+    });
+
+    const replay = await service.processTransaction(bet);
+    expect(first.balance.amount).toBe('80.00');
+    expect(replay.balance.amount).toBe('80.00');
+    expect(replay.idempotentReplay).toBe(true);
+  });
+
+  it('should reject a player id that does not own the wallet', async () => {
+    const result = await service.processTransaction({
+      providerId: 'provider-1',
+      externalTransactionId: 'tx-wrong-player',
+      playerId: 'another-player',
+      walletId: 'w-1',
+      roundId: 'round-1',
+      gameId: 'fortune-tiger',
+      kind: WagerTransactionKind.Bet,
+      money: { amount: '10.00', currency: 'BRL' },
+    });
+    expect(result.status).toBe(WagerTransactionStatus.Rejected);
+    expect(result.failureCode).toBe(FailureCode.PLAYER_MISMATCH);
+    expect(wallets.get('w-1')?.balance).toBe('100.00');
   });
 
   it('should throw ConflictError when same idempotency key is reused with different payload', async () => {

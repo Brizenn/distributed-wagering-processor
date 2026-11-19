@@ -1,22 +1,20 @@
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '../database/database.module';
 import { ApplicationModule } from '../../application/application.module';
-import { PresentationModule } from '../../presentation/presentation.module';
-import { SqsService } from './sqs.client';
+import { MetricsModule } from '../../observability/metrics.module';
+import { SqsClientModule } from './sqs-client.module';
 import { OutboxPublisher } from './outbox.publisher';
 import { SqsConsumer } from './sqs.consumer';
 import { PendingReferenceWorker } from './pending-reference.worker';
 
 @Module({
-  imports: [DatabaseModule, ApplicationModule, PresentationModule],
+  imports: [DatabaseModule, ApplicationModule, MetricsModule, SqsClientModule],
   providers: [
-    SqsService,
     OutboxPublisher,
     SqsConsumer,
     PendingReferenceWorker,
   ],
   exports: [
-    SqsService,
     OutboxPublisher,
     SqsConsumer,
     PendingReferenceWorker,

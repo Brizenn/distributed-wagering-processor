@@ -35,6 +35,8 @@ Para garantir a consistência mesmo sob eventuais falhas da aplicação, as segu
     (direction = 'DEBIT' AND balance_before - amount = balance_after)
   )
   ```
+* `wallet_ledger` é append-only: triggers bloqueiam `UPDATE`, `DELETE` e `TRUNCATE`; há no máximo um lançamento por transação e chaves estrangeiras garantem wallet/moeda/transação coerentes.
+* `wager_transactions` também valida valores não negativos, kinds/status permitidos e snapshot de saldo completo; índices parciais impedem repetir REFUND ou ROLLBACK processados para a mesma referência.
 * Unicidade de transações: `UNIQUE (provider_id, external_transaction_id)` e `UNIQUE (idempotency_key)`.
 
 ---
@@ -50,6 +52,8 @@ Optamos por **Pessimistic Write Lock (`SELECT ... FOR UPDATE`)** em vez de Optim
 1. Em carteiras com alto volume de apostas simultâneas ("hot wallets"), o lock otimista gera muitas falhas de versão, exigindo loops de retry que aumentam o consumo de CPU e a latência da API.
 2. A trava pessimista coloca as requisições concorrentes daquela carteira em fila no próprio banco.
 
+Antes de consultar os registros de idempotência, cada operação também adquire advisory transaction locks do PostgreSQL para a chave de idempotência e para a identidade `(providerId, externalTransactionId)`, sempre na mesma ordem. Isso fecha a corrida entre requisições simultâneas que ainda não encontraram uma linha existente. Esses locks são por identidade da operação; o lock da wallet continua sendo o que serializa alterações de saldo.
+
 **Exemplo do cenário obrigatório da Seção 8:**
 * Carteira com saldo inicial de 100.00 BRL recebe duas apostas de 80.00 BRL ao mesmo tempo.
 * A primeira aposta adquire o lock na linha da carteira, debita 80.00 (saldo vai a 20.00), grava o ledger e faz commit.
@@ -62,12 +66,12 @@ Optamos por **Pessimistic Write Lock (`SELECT ... FOR UPDATE`)** em vez de Optim
 
 Para garantir que reenvios de mensagens ou requisições repetidas não causem movimentações duplicadas:
 
-1. **Header `Idempotency-Key`**: Utilizado como chave mestra (com fallback para `{providerId}:{externalTransactionId}`).
+1. **Header `Idempotency-Key`**: Obrigatório na API HTTP e limitado a 255 caracteres. Mensagens SQS também precisam trazer uma chave. O use case mantém um fallback `{providerId}:{externalTransactionId}` apenas para chamadas internas sem chave explícita.
 2. **Hash Canônico (SHA-256)**:
    * Chaves do JSON são ordenadas alfabeticamente de forma recursiva antes do hashing, evitando que diferenças de formatação ou ordem de propriedades gerem hashes distintos para a mesma operação.
-   * Apenas dados de negócio entram no cálculo: `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money` e `referenceExternalTransactionId`.
+   * Apenas dados de negócio entram no cálculo: `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money` e `referenceExternalTransactionId`. O valor é normalizado por `Money` como string decimal antes do SHA-256.
 3. **Respostas**:
-   * **Payload idêntico**: Retorna a resposta original com `idempotentReplay: true` e o saldo atual, sem debitar a carteira novamente.
+   * **Payload idêntico**: Retorna a resposta original com `idempotentReplay: true`, inclusive o saldo observado no processamento original, sem debitar a carteira novamente.
    * **Mesma chave com payload alterado**: Retorna `409 Conflict`, pois se trata de uma inconsistência e não de um replay legítimo.
 
 ---
@@ -92,20 +96,21 @@ Requisicao HTTP / SQS Consumer
 OutboxPublisher Worker (FOR UPDATE SKIP LOCKED)
              |
              v
-       Fila AWS SQS FIFO
+       Fila wager-events.fifo
 ```
 
 ### Transactional Outbox
 Para resolver o problema de escrita dupla (*dual-write*):
 * A gravação do evento na tabela `outbox` ocorre dentro da mesma transação SQL da aposta.
-* O envio para o broker (SQS) é feito assincronamente pelo `OutboxPublisher`.
-* O publisher faz a leitura usando **`FOR UPDATE SKIP LOCKED`**, o que permite subir múltiplas instâncias da aplicação sem risco de dois workers processarem o mesmo evento simultaneamente.
-* Em falhas de rede com a AWS/LocalStack, o worker calcula o próximo agendamento com **Backoff Exponencial** (1s, 2s, 4s, 8s até 60s).
+* O envio para a fila dedicada de eventos `wager-events.fifo` é feito assincronamente pelo `OutboxPublisher`; a fila de entrada não consome nem descarta eventos de saída.
+* O publisher faz a leitura usando **`FOR UPDATE SKIP LOCKED`**, o que permite subir múltiplas instâncias sem que dois publishers reivindiquem a mesma linha ao mesmo tempo. A entrega é at-least-once: se o SQS aceitar o evento e o processo morrer antes do commit de `published_at`, ele pode ser reenviado; consumidores downstream devem deduplicar pelo `eventId`.
+* Em falhas de rede com a AWS/LocalStack, o worker calcula e persiste o próximo agendamento com **Backoff Exponencial** (1s, 2s, 4s, 8s até 60s).
 
 ### Inbox Pattern
 * Na ingestão de mensagens da fila `wager-transactions.fifo`, o `SqsConsumer` valida a chave composta `(consumer_name, message_id)` na tabela `inbox`.
 * Mensagens repetidas enviadas pelo SQS são descartadas antes de executar a lógica de débito.
 * O Ack (`deleteMessage`) no SQS só é executado **após o commit da transação SQL**.
+* Inbox, wager, saldo, ledger e outbox usam o mesmo `EntityManager` transacional; falha no commit reverte todos juntos.
 
 ---
 
@@ -114,9 +119,11 @@ Para resolver o problema de escrita dupla (*dual-write*):
 Quando um estorno (`REFUND` ou `ROLLBACK`) chega antes da aposta de origem:
 
 1. A transação é salva com status `PENDING_REFERENCE` (HTTP 202 Accepted).
-2. O `PendingReferenceWorker` consulta transações com esse status a cada intervalo configurável.
+2. O `PendingReferenceWorker` consulta transações vencidas a cada intervalo configurável; tentativas e próxima execução ficam persistidas, com backoff de 1s até 60s.
 3. Assim que a aposta de origem é persistida no banco, o worker reprocessa o estorno e credita a carteira.
 4. Caso a referência não chegue dentro do tempo limite (**TTL de 5 minutos**), a transação é marcada como `REJECTED` com o código `REFERENCE_NOT_FOUND` e o evento correspondente é emitido na outbox.
+
+Os endpoints `/health/live` e `/health/ready` são públicos. A readiness verifica PostgreSQL e as filas SQS de entrada, eventos e DLQ e retorna indisponibilidade se qualquer dependência estiver fora do ar.
 
 ---
 

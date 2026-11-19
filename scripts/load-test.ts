@@ -3,8 +3,6 @@
  * Run via: bun run test:load
  */
 
-declare const Bun: { env: Record<string, string | undefined> };
-
 async function runLoadTest(): Promise<void> {
   console.log('====================================================');
   console.log('  Distributed Wagering Processor - Load Benchmark  ');
@@ -118,3 +116,5 @@ async function runLoadTest(): Promise<void> {
 }
 
 runLoadTest();
+
+export {};

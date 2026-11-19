@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   SQSClient,
   SendMessageCommand,
@@ -11,22 +11,28 @@ import {
 } from '@aws-sdk/client-sqs';
 
 @Injectable()
-export class SqsService implements OnModuleInit {
+export class SqsService {
   private readonly logger = new Logger(SqsService.name);
   private readonly client: SQSClient;
   private readonly mainQueueUrl: string;
   private readonly dlqUrl: string;
+  private readonly outboxQueueUrl: string;
+  private queuesEnsured = false;
 
   constructor() {
     const region = process.env.AWS_REGION || 'us-east-1';
     const endpoint = process.env.AWS_ENDPOINT || 'http://localhost:4566';
+    const queueBaseUrl = `${endpoint.replace(/\/$/, '')}/000000000000`;
 
     this.mainQueueUrl =
       process.env.SQS_MAIN_QUEUE_URL ||
-      'http://localhost:4566/000000000000/wager-transactions.fifo';
+      `${queueBaseUrl}/wager-transactions.fifo`;
     this.dlqUrl =
       process.env.SQS_DLQ_URL ||
-      'http://localhost:4566/000000000000/wager-transactions-dlq.fifo';
+      `${queueBaseUrl}/wager-transactions-dlq.fifo`;
+    this.outboxQueueUrl =
+      process.env.SQS_OUTBOX_QUEUE_URL ||
+      `${queueBaseUrl}/wager-events.fifo`;
 
     this.client = new SQSClient({
       region,
@@ -38,14 +44,8 @@ export class SqsService implements OnModuleInit {
     });
   }
 
-  public async onModuleInit(): Promise<void> {
-    if (process.env.NODE_ENV === 'test') {
-      return;
-    }
-    await this.ensureQueues();
-  }
-
   public async ensureQueues(): Promise<void> {
+    if (this.queuesEnsured) return;
     try {
       // 1. Ensure DLQ exists
       await this.client.send(
@@ -86,10 +86,48 @@ export class SqsService implements OnModuleInit {
         }),
       );
 
+      // Integration events have their own queue; the request consumer must never
+      // acknowledge and discard events produced by the outbox.
+      await this.client.send(
+        new CreateQueueCommand({
+          QueueName: 'wager-events.fifo',
+          Attributes: {
+            FifoQueue: 'true',
+            ContentBasedDeduplication: 'false',
+          },
+        }),
+      );
+
+      this.queuesEnsured = true;
       this.logger.log('SQS FIFO queues verified and ready.');
     } catch (err: any) {
-      this.logger.warn(`Could not auto-create SQS queues: ${err.message}`);
+      this.logger.error(`Could not auto-create SQS queues: ${err.message}`);
+      throw err;
     }
+  }
+
+  public async checkReady(): Promise<void> {
+    for (const queueUrl of [this.mainQueueUrl, this.outboxQueueUrl, this.dlqUrl]) {
+      const response = await this.client.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: queueUrl,
+          AttributeNames: ['QueueArn'],
+        }),
+      );
+      if (!response.Attributes?.QueueArn) {
+        throw new Error(`SQS queue is unavailable: ${queueUrl}`);
+      }
+    }
+  }
+
+  public async getDlqApproximateMessageCount(): Promise<number> {
+    const response = await this.client.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: this.dlqUrl,
+        AttributeNames: ['ApproximateNumberOfMessages'],
+      }),
+    );
+    return Number.parseInt(response.Attributes?.ApproximateNumberOfMessages ?? '0', 10) || 0;
   }
 
   public async sendMessage(
@@ -152,5 +190,9 @@ export class SqsService implements OnModuleInit {
 
   public getDlqUrl(): string {
     return this.dlqUrl;
+  }
+
+  public getOutboxQueueUrl(): string {
+    return this.outboxQueueUrl;
   }
 }

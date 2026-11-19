@@ -29,6 +29,9 @@ export class Wallet {
     initialBalance: Money;
     createdAt?: Date;
   }): Wallet {
+    if (props.initialBalance.isNegative()) {
+      throw new InsufficientFundsError('Initial wallet balance cannot be negative');
+    }
     const now = props.createdAt ?? new Date();
     return new Wallet(
       props.id,
@@ -73,6 +76,9 @@ export class Wallet {
     at: Date = new Date(),
   ): WalletLedgerEntry {
     this.assertSameCurrency(amount);
+    if (amount.isNegative()) {
+      throw new InsufficientFundsError('Debit amount cannot be negative');
+    }
 
     if (this._balance.isLessThan(amount)) {
       throw new InsufficientFundsError(
@@ -84,8 +90,10 @@ export class Wallet {
     const balanceAfter = this._balance.subtract(amount);
 
     this._balance = balanceAfter;
-    this._version += 1;
-    this._updatedAt = at;
+    if (!amount.isZero()) {
+      this._version += 1;
+      this._updatedAt = at;
+    }
 
     return WalletLedgerEntry.create({
       id: ledgerEntryId,
@@ -106,13 +114,18 @@ export class Wallet {
     at: Date = new Date(),
   ): WalletLedgerEntry {
     this.assertSameCurrency(amount);
+    if (amount.isNegative()) {
+      throw new InsufficientFundsError('Credit amount cannot be negative');
+    }
 
     const balanceBefore = this._balance;
     const balanceAfter = this._balance.add(amount);
 
     this._balance = balanceAfter;
-    this._version += 1;
-    this._updatedAt = at;
+    if (!amount.isZero()) {
+      this._version += 1;
+      this._updatedAt = at;
+    }
 
     return WalletLedgerEntry.create({
       id: ledgerEntryId,

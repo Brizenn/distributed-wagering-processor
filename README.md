@@ -38,7 +38,7 @@ docker-compose up -d
 ```
 O comando acima inicializa:
 * PostgreSQL 16 na porta 5432
-* LocalStack na porta 4566, com as filas FIFO `wager-transactions.fifo` e `wager-transactions-dlq.fifo` criadas automaticamente pelo script de inicialização.
+* LocalStack na porta 4566, com as filas FIFO `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wager-events.fifo` criadas automaticamente.
 
 ### 3. Executar as migrations do banco
 ```bash
@@ -55,21 +55,55 @@ A API ficará disponível em `http://localhost:3000`.
 
 ## Testes
 
-A suíte cobre validações de domínio, idempotência, isolamento transacional e cenários de concorrência real:
+Os testes unitários usam dublês em memória. Os testes que precisam de PostgreSQL e SQS reais ficam separados no perfil `integration`.
 
-```bash
-# Executar todos os testes
+### Sequência recomendada no Windows / PowerShell
+
+1. Abra o Docker Desktop e espere o engine ficar pronto.
+2. No terminal, na pasta do projeto, instale dependências e rode as verificações locais:
+
+```powershell
+bun install
+bun run typecheck
 bun test
+```
 
-# Executar apenas testes unitários
+3. Suba os serviços isolados de teste e confirme o estado:
+
+```powershell
+docker compose --profile integration up -d postgres-test localstack-test
+docker compose --profile integration ps
+```
+
+Espere `postgres-test` e `localstack-test` ficarem `healthy`. Se algum deles não ficar saudável:
+
+```powershell
+docker compose --profile integration logs --tail 80 postgres-test localstack-test
+```
+
+4. Execute a integração com migrations, SQS/LocalStack e três processos Bun concorrentes:
+
+```powershell
+bun run test:integration
+```
+
+5. Depois da validação, os containers podem continuar ligados para outra rodada ou ser parados sem apagar os volumes:
+
+```powershell
+docker compose --profile integration down
+```
+
+Os testes de integração usam PostgreSQL separado na porta `5433`, banco `wagering_test_db`, e LocalStack separado na porta `4567`. O script aplica as migrations de teste e configura URLs SQS próprias. Os testes unitários não dependem desses containers; o teste de concorrência unitário simula os locks e não substitui a integração real.
+
+### Comandos individuais
+
+```powershell
 bun run test:unit
-
-# Executar testes de concorrência (cenário da Seção 8 e 50 requisições simultâneas)
 bun run test:concurrency
-
-# Executar benchmark de carga
 bun run test:load
 ```
+
+Só integre em `main` depois que `bun run typecheck`, `bun test` e `bun run test:integration` terminarem sem falhas.
 
 ---
 
@@ -227,7 +261,7 @@ Resposta esperada:
 # Liveness
 Invoke-RestMethod -Method Get -Uri "http://localhost:3000/health/live" | ConvertTo-Json
 
-# Readiness (valida conectividade com PostgreSQL)
+# Readiness (valida PostgreSQL e as filas SQS de entrada, eventos e DLQ)
 Invoke-RestMethod -Method Get -Uri "http://localhost:3000/health/ready" | ConvertTo-Json
 
 # Métricas internas
