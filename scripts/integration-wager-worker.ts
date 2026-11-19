@@ -17,14 +17,19 @@ async function run(): Promise<void> {
   const request = JSON.parse(serializedRequest) as WorkerRequest;
   const orm = await MikroORM.init(databaseConfig);
   try {
-    const service = new WagerTransactionService(
-      orm.em.fork(),
-      new IdempotencyService(),
-      new MetricsService(),
-    );
-    const results = await Promise.all(Array.from({ length: request.count }, () =>
-      service.processTransaction(request.dto, { idempotencyKey: request.idempotencyKey }),
-    ));
+    const results = [];
+    // Bound each process's open SQL transactions while all three processes race together.
+    for (let offset = 0; offset < request.count; offset += 3) {
+      const batchSize = Math.min(3, request.count - offset);
+      const batch = await Promise.all(Array.from({ length: batchSize }, () =>
+        new WagerTransactionService(
+          orm.em.fork(),
+          new IdempotencyService(),
+          new MetricsService(),
+        ).processTransaction(request.dto, { idempotencyKey: request.idempotencyKey }),
+      ));
+      results.push(...batch);
+    }
     console.log(JSON.stringify(results));
   } finally {
     await orm.close(true);
