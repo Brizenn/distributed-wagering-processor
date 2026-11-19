@@ -34,10 +34,23 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
     });
   }
 
-  async function receiveOne(queueUrl: string) {
-    const messages = await sqs.receiveMessages(queueUrl, 1, 5);
-    if (!messages[0]) throw new Error(`No message received from ${queueUrl}`);
-    return messages[0];
+  async function receiveOne(queueUrl: string, expectedMessageId: string) {
+    for (let batchNumber = 0; batchNumber < 50; batchNumber += 1) {
+      const messages = await sqs.receiveMessages(queueUrl, 10, 1);
+      for (const message of messages) {
+        let actualMessageId: string | undefined;
+        try {
+          actualMessageId = JSON.parse(message.Body || '{}').messageId;
+        } catch {
+          // Drop stale malformed test messages while looking for the requested message.
+        }
+        if (actualMessageId === expectedMessageId) return message;
+        if (message.ReceiptHandle) {
+          await sqs.deleteMessage(queueUrl, message.ReceiptHandle);
+        }
+      }
+    }
+    throw new Error(`Message ${expectedMessageId} was not received from ${queueUrl}`);
   }
 
   async function runInSeparateProcess(request: {
@@ -47,7 +60,7 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
   }) {
     const child = Bun.spawn(
       ['bun', 'run', 'scripts/integration-wager-worker.ts', JSON.stringify(request)],
-      { stdout: 'pipe', stderr: 'pipe' },
+      { stdout: 'pipe', stderr: 'pipe', env: { ...process.env } as Record<string, string> },
     );
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited,
@@ -130,7 +143,7 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
         [debits[0].id],
       ),
     ).rejects.toThrow();
-  });
+  }, { timeout: 60_000 });
 
   it('applies a pending refund to its existing transaction when the BET arrives later', async () => {
     const wallet = await openWallet();
@@ -176,7 +189,7 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
       },
     });
     await sqs.sendMessage(sqs.getMainQueueUrl(), body, wallet.id, messageId);
-    const message = await receiveOne(sqs.getMainQueueUrl());
+    const message = await receiveOne(sqs.getMainQueueUrl(), messageId);
     const consumer = new SqsConsumer(orm.em.fork(), sqs, wagerService(), metrics());
     expect(await consumer.processSingleMessage(message)).toBe(true);
     // Simulate redelivery after the SQL commit but before the prior ack reached SQS.
@@ -197,16 +210,26 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
 
     const publisher = new OutboxPublisher(orm.em.fork(), sqs, metrics());
     await publisher.publishPendingMessages(500);
-    const publishedEvents = await sqs.receiveMessages(sqs.getOutboxQueueUrl(), 10, 5);
-    const eventBodies = publishedEvents.map((event) => JSON.parse(event.Body || '{}'));
-    expect(eventBodies.some((event) =>
-      event.eventType === 'WagerTransactionProcessed' &&
-      event.data?.transactionId === transaction.id,
-    )).toBe(true);
-    for (const event of publishedEvents) {
-      if (event.ReceiptHandle) await sqs.deleteMessage(sqs.getOutboxQueueUrl(), event.ReceiptHandle);
+    let targetEventReceived = false;
+    for (let batchNumber = 0; batchNumber < 25 && !targetEventReceived; batchNumber += 1) {
+      // Earlier integration runs may leave opening events ahead of this event in the FIFO queue.
+      const publishedEvents = await sqs.receiveMessages(sqs.getOutboxQueueUrl(), 10, 1);
+      if (publishedEvents.length === 0) break;
+      for (const event of publishedEvents) {
+        const eventBody = JSON.parse(event.Body || '{}');
+        if (
+          eventBody.eventType === 'WagerTransactionProcessed' &&
+          eventBody.data?.transactionId === transaction.id
+        ) {
+          targetEventReceived = true;
+        }
+        if (event.ReceiptHandle) {
+          await sqs.deleteMessage(sqs.getOutboxQueueUrl(), event.ReceiptHandle);
+        }
+      }
     }
-  });
+    expect(targetEventReceived).toBe(true);
+  }, { timeout: 60_000 });
 
   it('rolls back wallet, ledger, transaction, outbox and inbox when the inbox commit fails', async () => {
     const wallet = await openWallet();
@@ -244,7 +267,7 @@ describeIntegration('PostgreSQL and LocalStack integration', () => {
         },
       });
       await sqs.sendMessage(sqs.getMainQueueUrl(), body, wallet.id, messageId);
-      const message = await receiveOne(sqs.getMainQueueUrl());
+      const message = await receiveOne(sqs.getMainQueueUrl(), messageId);
       const consumer = new SqsConsumer(orm.em.fork(), sqs, wagerService(), metrics());
       expect(await consumer.processSingleMessage(message)).toBe(false);
 

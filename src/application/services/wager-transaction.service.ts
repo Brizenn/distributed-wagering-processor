@@ -221,6 +221,8 @@ export class WagerTransactionService {
       await connection.execute(
         'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
         [identity],
+        'all',
+        em.getTransactionContext?.(),
       );
     }
   }

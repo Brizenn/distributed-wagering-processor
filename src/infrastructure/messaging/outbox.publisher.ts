@@ -68,6 +68,9 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
       const lagRows = await conn.execute(
         `SELECT EXTRACT(EPOCH FROM (NOW() - MIN(occurred_at))) * 1000 AS lag_ms
          FROM outbox WHERE published_at IS NULL`,
+        [],
+        'all',
+        em.getTransactionContext?.(),
       );
       this.metricsService.recordOutboxLag(Number(lagRows?.[0]?.lag_ms ?? 0));
 
@@ -80,6 +83,8 @@ export class OutboxPublisher implements OnModuleInit, OnModuleDestroy {
          LIMIT ?
          FOR UPDATE SKIP LOCKED`,
         [batchSize],
+        'all',
+        em.getTransactionContext?.(),
       );
 
       if (!rawRows || rawRows.length === 0) {
